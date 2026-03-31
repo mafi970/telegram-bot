@@ -19,7 +19,7 @@ def get_bot_token():
             sys.exit(1)
         return token
 
-BOT_TOKEN = get_bot_token()
+BOT_TOKEN = os.getenv("8710999964:AAEVHzSVrkpljKqCE-XHOk_Sa__Xk8idx2k")
 
 # ================= BOT =================
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
