@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 apihelper.ENABLE_MIDDLEWARE = True
 
 # ================= TOKEN =================
-BOT_TOKEN = os.getenv("8710999964:AAEVHzSVrkpljKqCE-XHOk_Sa__Xk8idx2k")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN missing!")
