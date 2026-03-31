@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import telebot, instaloader, time, os, pyotp, threading, sys
+import telebot, instaloader, os, pyotp, threading
 from telebot import types, apihelper
 from concurrent.futures import ThreadPoolExecutor
 
 apihelper.ENABLE_MIDDLEWARE = True
 
 # ================= TOKEN =================
-def get_bot_token():
-    if len(sys.argv) > 1:
-        return sys.argv[1]
-    else:
-        print("🔐 Enter your bot token:")
-        token = input("➜ ").strip()
-        if not token:
-            print("❌ Token is required!")
-            sys.exit(1)
-        return token
-
 BOT_TOKEN = os.getenv("8710999964:AAEVHzSVrkpljKqCE-XHOk_Sa__Xk8idx2k")
+
+if not BOT_TOKEN:
+    print("❌ BOT_TOKEN missing!")
+    exit()
 
 # ================= BOT =================
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
@@ -49,12 +42,12 @@ def login_worker(chat_id, u, p, k):
     try:
         L.login(u, p)
         save_success(chat_id, L, u, p)
-    except:
+    except Exception:
         try:
             totp = pyotp.TOTP(k.replace(" ", ""))
             L.two_factor_login(totp.now())
             save_success(chat_id, L, u, p)
-        except:
+        except Exception:
             if chat_id in user_sessions:
                 user_sessions[chat_id]['failed'] += 1
                 bot.send_message(chat_id, f"❌ *FAILED:* `{u}`")
@@ -73,12 +66,7 @@ def save_success(chat_id, L, u, p):
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     text = """
-🔥 *MãF! COOKIES BOT*
-
-━━━━━━━━━━━━━━━
-🚀 Fast Extract System
-🔐 Secure Login Engine
-━━━━━━━━━━━━━━━
+🔥 *Bot Running Successfully!*
 
 Click START to begin 👇
 """
@@ -160,7 +148,7 @@ def final_step(message):
 
     bot.send_message(chat_id, f"⚡ *Processing {len(u_list)} accounts...*")
 
-    executor = ThreadPoolExecutor(max_workers=100)
+    executor = ThreadPoolExecutor(max_workers=20)
 
     for i in range(len(u_list)):
         executor.submit(login_worker, chat_id, u_list[i], p, keys[i])
@@ -172,31 +160,15 @@ def final_step(message):
             return
 
         data = user_sessions[chat_id]
-        success_count = data['success']
-        failed_count = data['failed']
-        total = len(data['u_list'])
-
         summary = f"""
 📊 *RESULT SUMMARY*
 
-━━━━━━━━━━━━━━━
-✅ SUCCESS : `{success_count}`
-❌ FAILED  : `{failed_count}`
-📦 TOTAL   : `{total}`
-━━━━━━━━━━━━━━━
+✅ SUCCESS : `{data['success']}`
+❌ FAILED  : `{data['failed']}`
+📦 TOTAL   : `{len(data['u_list'])}`
 """
+
         bot.send_message(chat_id, summary, reply_markup=get_start_markup())
-
-        if data['results']:
-            fname = f"result_{chat_id}.txt"
-
-            with open(fname, "w") as f:
-                f.write("\n".join(data['results']))
-
-            with open(fname, "rb") as d:
-                bot.send_document(chat_id, d)
-
-            os.remove(fname)
 
     threading.Thread(target=finalize).start()
 
