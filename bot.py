@@ -1,178 +1,226 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import telebot
+import requests
+from telebot import types
+import re
 
-import telebot, instaloader, os, pyotp, threading
-from telebot import types, apihelper
-from concurrent.futures import ThreadPoolExecutor
+# =========================================
+# BOT TOKEN
+# =========================================
+BOT_TOKEN = "8710999964:AAHV_3swM28F3FDEdL4ERQEfcI-sDGUBY6I"
+bot = telebot.TeleBot(BOT_TOKEN)
 
-apihelper.ENABLE_MIDDLEWARE = True
+# =========================================
+# SESSION STORE
+# =========================================
+sessions = {}
 
-# ================= TOKEN =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# =========================================
+# GET ACCESS TOKEN
+# =========================================
+def get_access_token(refresh_token, client_id):
 
-if not BOT_TOKEN:
-    print("❌ BOT_TOKEN missing!")
-    exit()
+    url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
-# ================= BOT =================
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-
-UA = 'Mozilla/5.0'
-user_sessions = {}
-
-# ================= BUTTON =================
-def get_start_markup():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("🚀 START"))
-    return markup
-
-def get_cancel_markup():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("❌ CANCEL"))
-    return markup
-
-# ================= LOGIN =================
-def login_worker(chat_id, u, p, k):
-    if chat_id not in user_sessions:
-        return
-
-    L = instaloader.Instaloader(quiet=True, max_connection_attempts=1)
-    L.context._session.headers.update({'User-Agent': UA})
-
-    try:
-        L.login(u, p)
-        save_success(chat_id, L, u, p)
-    except Exception:
-        try:
-            totp = pyotp.TOTP(k.replace(" ", ""))
-            L.two_factor_login(totp.now())
-            save_success(chat_id, L, u, p)
-        except Exception:
-            if chat_id in user_sessions:
-                user_sessions[chat_id]['failed'] += 1
-                bot.send_message(chat_id, f"❌ *FAILED:* `{u}`")
-
-def save_success(chat_id, L, u, p):
-    if chat_id in user_sessions:
-        cookies = L.context._session.cookies.get_dict()
-        ck_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-
-        user_sessions[chat_id]['results'].append(f"{u}|{p}|{ck_str}")
-        user_sessions[chat_id]['success'] += 1
-
-        bot.send_message(chat_id, f"✅ *SUCCESS:* `{u}`")
-
-# ================= HANDLERS =================
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    text = """
-🔥 *Bot Running Successfully!*
-
-Click START to begin 👇
-"""
-    bot.send_message(message.chat.id, text, reply_markup=get_start_markup())
-
-@bot.message_handler(func=lambda m: m.text == "❌ CANCEL")
-def cancel_work(message):
-    chat_id = message.chat.id
-
-    user_sessions.pop(chat_id, None)
-    bot.clear_step_handler_by_chat_id(chat_id)
-
-    bot.send_message(
-        chat_id,
-        "🚫 *Process Cancelled!*",
-        reply_markup=get_start_markup()
-    )
-
-@bot.message_handler(func=lambda m: m.text == "🚀 START")
-def step1(message):
-    msg = bot.send_message(
-        message.chat.id,
-        "📥 *Send usernames (line by line):*",
-        reply_markup=get_cancel_markup()
-    )
-    bot.register_next_step_handler(msg, step2)
-
-def step2(message):
-    if message.text == "❌ CANCEL":
-        cancel_work(message)
-        return
-
-    chat_id = message.chat.id
-    usernames = [u.strip() for u in message.text.splitlines() if u.strip()]
-
-    user_sessions[chat_id] = {
-        'u_list': usernames,
-        'results': [],
-        'success': 0,
-        'failed': 0
+    data = {
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": "offline_access Mail.Read"
     }
 
-    msg = bot.send_message(
-        chat_id,
-        "🔑 *Enter password:*",
-        reply_markup=get_cancel_markup()
+    try:
+        r = requests.post(url, data=data, timeout=20)
+
+        if r.status_code == 200:
+            return r.json().get("access_token")
+
+        return None
+
+    except:
+        return None
+
+
+# =========================================
+# GET MAILS
+# =========================================
+def get_recent_mails(access_token):
+
+    url = "https://graph.microsoft.com/v1.0/me/messages?$top=5&$orderby=receivedDateTime desc"
+
+    headers = {
+        "Authorization": f"Bearer {access_token}"
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+
+        if r.status_code == 200:
+            return r.json().get("value", [])
+
+        return []
+
+    except:
+        return []
+
+
+# =========================================
+# BUILD OUTPUT (OTP MONOSPACE)
+# =========================================
+def build_output(email, mails):
+
+    output = f"📧 EMAIL: {email}\n\n"
+
+    for i, mail in enumerate(mails, start=1):
+
+        subject = mail.get("subject", "No Subject")
+
+        sender = "Unknown"
+        try:
+            sender = mail["from"]["emailAddress"]["address"]
+        except:
+            pass
+
+        received = mail.get("receivedDateTime", "Unknown")
+
+        # OTP extract (4–8 digits)
+        otp_match = re.findall(r"\b\d{4,8}\b", subject)
+        otp = otp_match[0] if otp_match else None
+
+        output += (
+            f"━━━━━━━━━━━━━━\n"
+            f"[{i}] SUBJECT: {subject}\n"
+            f"FROM: {sender}\n"
+            f"TIME: {received}\n"
+        )
+
+        # 🔥 MONOSPACE OTP (click to copy)
+        if otp:
+            output += f"🔐 OTP: <code>{otp}</code>\n"
+
+        output += "\n"
+
+    return output[:4000]
+
+
+# =========================================
+# START COMMAND
+# =========================================
+@bot.message_handler(commands=["start"])
+def start(message):
+
+    bot.reply_to(
+        message,
+        "Send account in this format:\n\nemail|pass|refresh_token|client_id"
     )
-    bot.register_next_step_handler(msg, step3)
 
-def step3(message):
-    if message.text == "❌ CANCEL":
-        cancel_work(message)
+
+# =========================================
+# HANDLE ACCOUNT
+# =========================================
+@bot.message_handler(func=lambda m: True)
+def check_account(message):
+
+    try:
+        email, password, refresh_token, client_id = message.text.strip().split("|", 3)
+
+    except:
+        bot.reply_to(
+            message,
+            "Wrong format!\n\nUse:\nemail|pass|refresh_token|client_id"
+        )
         return
 
-    chat_id = message.chat.id
-    user_sessions[chat_id]['common_pass'] = message.text.strip()
+    msg = bot.reply_to(message, f"Checking {email}...")
 
-    msg = bot.send_message(
-        chat_id,
-        "🔐 *Send 2FA keys (line by line):*",
-        reply_markup=get_cancel_markup()
+    access_token = get_access_token(refresh_token, client_id)
+
+    if not access_token:
+        bot.edit_message_text(
+            "Token Failed!",
+            chat_id=message.chat.id,
+            message_id=msg.message_id
+        )
+        return
+
+    mails = get_recent_mails(access_token)
+
+    if not mails:
+        bot.edit_message_text(
+            "No mails found!",
+            chat_id=message.chat.id,
+            message_id=msg.message_id
+        )
+        return
+
+    output = build_output(email, mails)
+
+    # save session
+    sessions[msg.message_id] = {
+        "email": email,
+        "refresh_token": refresh_token,
+        "client_id": client_id
+    }
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{msg.message_id}")
     )
-    bot.register_next_step_handler(msg, final_step)
 
-def final_step(message):
-    if message.text == "❌ CANCEL":
-        cancel_work(message)
+    bot.edit_message_text(
+        output,
+        chat_id=message.chat.id,
+        message_id=msg.message_id,
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+
+
+# =========================================
+# REFRESH HANDLER
+# =========================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refresh:"))
+def refresh_mails(call):
+
+    msg_id = int(call.data.split(":")[1])
+
+    session = sessions.get(msg_id)
+
+    if not session:
+        bot.answer_callback_query(call.id, "Session expired!")
         return
 
-    chat_id = message.chat.id
+    bot.answer_callback_query(call.id, "Refreshing...")
 
-    keys = [k.strip() for k in message.text.splitlines() if k.strip()]
-    u_list = user_sessions[chat_id]['u_list']
-    p = user_sessions[chat_id]['common_pass']
+    access_token = get_access_token(session["refresh_token"], session["client_id"])
 
-    if len(u_list) != len(keys):
-        bot.send_message(chat_id, "❌ *Mismatch in usernames & keys!*")
+    if not access_token:
+        bot.edit_message_text(
+            "Token refresh failed!",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
         return
 
-    bot.send_message(chat_id, f"⚡ *Processing {len(u_list)} accounts...*")
+    mails = get_recent_mails(access_token)
 
-    executor = ThreadPoolExecutor(max_workers=20)
+    output = build_output(session["email"], mails)
 
-    for i in range(len(u_list)):
-        executor.submit(login_worker, chat_id, u_list[i], p, keys[i])
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{msg_id}")
+    )
 
-    def finalize():
-        executor.shutdown(wait=True)
+    bot.edit_message_text(
+        output,
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
 
-        if chat_id not in user_sessions:
-            return
 
-        data = user_sessions[chat_id]
-        summary = f"""
-📊 *RESULT SUMMARY*
-
-✅ SUCCESS : `{data['success']}`
-❌ FAILED  : `{data['failed']}`
-📦 TOTAL   : `{len(data['u_list'])}`
-"""
-
-        bot.send_message(chat_id, summary, reply_markup=get_start_markup())
-
-    threading.Thread(target=finalize).start()
-
-# ================= RUN =================
-if __name__ == "__main__":
-    print("🚀 Bot Running...")
-    bot.infinity_polling()
+# =========================================
+# RUN BOT
+# =========================================
+print("BOT RUNNING...")
+bot.infinity_polling()
