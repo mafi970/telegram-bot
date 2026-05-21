@@ -6,7 +6,8 @@ import re
 # =========================================
 # BOT TOKEN
 # =========================================
-BOT_TOKEN = "8710999964:AAHV_3swM28F3FDEdL4ERQEfcI-sDGUBY6I"
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # =========================================
