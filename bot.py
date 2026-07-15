@@ -11,7 +11,13 @@ from openpyxl import Workbook
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import os
+import telebot
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set!")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
 lock = threading.Lock()
