@@ -10,9 +10,6 @@ import os  # OS মডিউল নিশ্চিত করার জন্য 
 from openpyxl import Workbook
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import os
-import telebot
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -24,7 +21,6 @@ lock = threading.Lock()
 processing = False
 
 # কনকারেন্ট থ্রেড সংখ্যা (একসাথে কতগুলো অ্যাকাউন্ট চেক হবে)
-# স্পিড আরও বাড়াতে চাইলে ১০ থেকে বাড়িয়ে ১৫ বা ২০ করতে পারেন।
 MAX_WORKERS = 10 
 
 # =========================================
@@ -97,39 +93,39 @@ def get_access_token(refresh_token, client_id):
         return None, str(e)
 
 # =========================================
-# GET FIRST EMAIL
+# GET RECENT MESSAGES (ইনবক্সের সাম্প্রতিক ২০টি মেইল আনবে)
 # =========================================
-def get_first_mail_subject_and_body(access_token):
-    url = "https://graph.microsoft.com/v1.0/me/messages?$top=1&$orderby=receivedDateTime desc&$select=subject,bodyPreview"
+def get_recent_messages(access_token):
+    url = "https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime desc&$select=subject,bodyPreview"
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
-            mails = r.json().get("value", [])
-            if mails:
-                return mails[0].get("subject", ""), mails[0].get("bodyPreview", ""), None
-            return "", "", None
+            return r.json().get("value", []), None
         else:
-            return None, None, f"Graph API Error {r.status_code}"
+            return None, f"Graph API Error {r.status_code}"
     except Exception as e:
-        return None, None, str(e)
+        return None, str(e)
 
 # =========================================
-# CLASSIFY
+# CLASSIFY (Amazon + Mi Railway লজিক যুক্ত)
 # =========================================
-def classify_account(subject, body_preview=""):
-    if not subject and not body_preview:
+def classify_account(messages):
+    if not messages:
         return "NO_AMA"
     
-    sub_lower = (subject or "").lower()
-    body_lower = (body_preview or "").lower()
-    
+    # Amazon এবং Mi Railway দুইটার ভেরিফিকেশন কি-ওয়ার্ডই এখানে দেওয়া হয়েছে
     verify_patterns = [
         "verify your new amazon account",
         "verify your amazon account",
         "amazon account verification",
         "welcome to amazon",
-        "verify your email address for amazon"
+        "verify your email address for amazon",
+        "mi railway",         # Mi Railway এর জন্য যুক্ত করা হলো
+        "xiaomi",             # শাওমি মেইলের জন্য
+        "mi account",         # মি অ্যাকাউন্ট মেইলের জন্য
+        "railway activation",
+        "railway verification"
     ]
     
     suspended_patterns = [
@@ -138,20 +134,38 @@ def classify_account(subject, body_preview=""):
         "suspendido",
         "se ha suspendido",
         "your account has been suspended",
-        "cuenta de amazon ha sido suspendida"
+        "cuenta de amazon ha sido suspendida",
+        "account restricted", # সাধারণ রেস্ট্রিকশন বা সাসপেনশন মেইলের জন্য
+        "deactivated"
     ]
     
-    combined = sub_lower + " " + body_lower
+    verify_index = -1
+    suspended_index = -1
     
-    for pattern in verify_patterns:
-        if pattern in combined:
-            return "LIVE"
+    # ইনবক্সের মেইলগুলো স্ক্যান করা হচ্ছে (০ ইনডেক্স মানে একদম নতুন মেইল)
+    for idx, msg in enumerate(messages):
+        sub_lower = (msg.get("subject") or "").lower()
+        body_lower = (msg.get("bodyPreview") or "").lower()
+        combined = sub_lower + " " + body_lower
+        
+        is_verify = any(p in combined for p in verify_patterns)
+        is_suspended = any(p in combined for p in suspended_patterns)
+        
+        if is_verify and verify_index == -1:
+            verify_index = idx
+        if is_suspended and suspended_index == -1:
+            suspended_index = idx
+
+    # ১. যদি কোনো ম্যাচিং ভেরিফিকেশন ইমেইল না পাওয়া যায়
+    if verify_index == -1:
+        return "NO_AMA"
     
-    has_suspended = any(p in combined for p in suspended_patterns)
-    if has_suspended:
+    # ২. ভেরিফিকেশন মেইল আসার পর যদি নতুন কোনো সাসপেন্ড বা টেক অ্যাকশন মেইল এসে থাকে
+    if suspended_index != -1 and suspended_index < verify_index:
         return "DEAD"
     
-    return "NO_AMA"
+    # ৩. ভেরিফিকেশন মেইল আছে কিন্তু পরে কোনো ঝামেলাপূর্ণ মেইল আসেনি
+    return "LIVE"
 
 # =========================================
 # READ XLSX (KEEPS ORIGINAL ROWS)
@@ -214,7 +228,7 @@ def worker_check_task(item):
     acc = item["parsed"]
     orig = item["original_row"]
     
-    result, subject, body_preview, error = check_single_account(
+    result, error = check_single_account(
         acc['email'], acc['password'], acc['refresh_token'], acc['client_id']
     )
     return result, orig, acc['email']
@@ -222,22 +236,21 @@ def worker_check_task(item):
 def check_single_account(email, password, refresh_token, client_id):
     access_token, token_error = get_access_token(refresh_token, client_id)
     if not access_token:
-        return "TOKEN_FAIL", None, None, token_error
+        return "TOKEN_FAIL", token_error
     
-    subject, body_preview, api_error = get_first_mail_subject_and_body(access_token)
+    messages, api_error = get_recent_messages(access_token)
     if api_error:
-        return "API_ERROR", None, None, api_error
+        return "API_ERROR", api_error
     
-    result = classify_account(subject, body_preview)
-    return result, subject, body_preview, None
+    result = classify_account(messages)
+    return result, None
 
 # =========================================
-# REPLY KEYBOARD ONLY (WITH NEW LOGO)
+# REPLY KEYBOARD ONLY (UPDATED LABEL)
 # =========================================
 def get_reply_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    # বাটন এ শপিং ব্যাগ ও বক্স ইমোজি দিয়ে লোগো ভাইব দেওয়া হয়েছে
-    markup.add(types.KeyboardButton("📦 Amazon Submit 🛍️"))
+    markup.add(types.KeyboardButton("📦 Submit File 🛍️"))
     return markup
 
 # =========================================
@@ -250,7 +263,7 @@ def start(message):
         message.chat.id,
         "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Amazon_logo.svg/2560px-Amazon_logo.svg.png",
         caption=(
-            "⚡ *Turbo Fast Amazon Checker by MaF!*\n\n"
+            "⚡ *Turbo Fast Mail Checker (Amazon & Mi Railway)!*\n\n"
             "👋 স্বাগতম! আপনার এক্সেল ফাইলটি সরাসরি চ্যাটে ড্রপ করুন অথবা নিচের বাটনে ক্লিক করুন।"
         ),
         parse_mode="Markdown",
@@ -309,7 +322,6 @@ def handle_file(message):
             completed_count = 0
             last_update_time = time.time()
             
-            # ThreadPoolExecutor দিয়ে প্যারালাল (Fast) প্রসেসিং
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_to_acc = {executor.submit(worker_check_task, item): item for item in accounts}
                 
@@ -328,12 +340,11 @@ def handle_file(message):
                     else:
                         no_amazon_accounts.append(orig)
                     
-                    # প্রতি ৩টি অ্যাকাউন্ট পর পর অথবা ১.৫ সেকেন্ড পর পর লাইভ আপডেট দেবে (টেলিগ্রাম লিমিট এড়াতে)
                     if completed_count % 3 == 0 or (time.time() - last_update_time) > 1.5:
                         try:
                             bot.edit_message_text(
-                                f"⚡ Chaking : [ {completed_count} / {total_accs} ]\n"
-                                f"✅ Live: {len(live_accounts)} | ❌ Dead: {len(dead_accounts)} | ⚠️ No Ama: {len(no_amazon_accounts)}",
+                                f"⚡ Checking : [ {completed_count} / {total_accs} ]\n"
+                                f"✅ Live: {len(live_accounts)} | ❌ Dead: {len(dead_accounts)} | ⚠️ No Match: {len(no_amazon_accounts)}",
                                 chat_id=message.chat.id,
                                 message_id=status_msg.message_id
                             )
@@ -347,7 +358,7 @@ def handle_file(message):
                 f"📁 Total Rows: {total_accs}\n"
                 f"✅ LIVE: {len(live_accounts)}\n"
                 f"❌ DEAD: {len(dead_accounts)}\n"
-                f"⚠️ NO AMA: {len(no_amazon_accounts)}\n"
+                f"⚠️ NO MATCH: {len(no_amazon_accounts)}\n"
                 f"💥 Token Fail: {len(token_failed_accounts)}\n"
                 f"🌐 API Error: {len(api_failed_accounts)}"
             )
@@ -400,15 +411,14 @@ def handle_file(message):
 # =========================================
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
-    # নতুন লোগো দেওয়া টেক্সট ম্যাচিং
-    if "Amazon Submit" in message.text:
+    if "Submit File" in message.text or "Amazon Submit" in message.text:
         bot.reply_to(
             message,
             "📤 *Import Excel File Instruction*\n\n"
             "আপনার এক্সেল ফাইলটি সরাসরি এই চ্যাটে অ্যাটাচমেন্ট হিসেবে দিন।\n\n"
             "ফরম্যাট লেআউট:\n"
             "A=Name | B=Email | C=Pass | D=email\\|user\\|RT\\|ClientID\n\n"
-            "ফলাফলে আপনার পাঠানো অরিজিনাল কলামগুলো হুবহু ফেরত দেওয়া হবে।",
+            "ফলাফলে আপনার পাঠানো অরিজিনাল কলামগুলো হুবহু ফেরত দেওয়া হবে।",
             parse_mode="Markdown"
         )
     elif message.text.startswith("/check"):
@@ -428,7 +438,7 @@ def handle_text(message):
             msg = bot.reply_to(message, f"🔍 Checking `{email}`...", parse_mode="Markdown")
             
             def worker():
-                result, subject, body_preview, error = check_single_account(email, password, refresh_token, client_id)
+                result, error = check_single_account(email, password, refresh_token, client_id)
                 emoji = {"LIVE": "✅", "DEAD": "❌", "NO_AMA": "⚠️", "TOKEN_FAIL": "💥", "API_ERROR": "🌐"}
                 bot.edit_message_text(
                     f"📧 *Account Check Result:*\n\n"
@@ -445,17 +455,14 @@ def handle_text(message):
         markup = get_reply_keyboard()
         bot.reply_to(
             message,
-            "🤖 *Amazon Checker by MaF!*\n\n"
-            "গাইডলাইন দেখতে নিচে থাকা `📦 Amazon Submit 🛍️` বাটনে প্রেস করুন অথবা সরাসরি ফাইল সেন্ড করুন।",
+            "🤖 *Checker by MaF!*\n\n"
+            "গাইডলাইন দেখতে নিচে থাকা `📦 Submit File 🛍️` বাটনে প্রেস করুন অথবা সরাসরি ফাইল সেন্ড করুন।",
             reply_markup=markup
         )
 
 # =========================================
 # RUN BOT
 # =========================================
-# ---------- UI ----------
-os.system("cls")
-os.system("title MaFi Shadow ⚡ Secure Console")
-
-print("🚀 Turbo Fast Amazon Checker by MaF! RUNNING")
+os.system("cls" if os.name == "nt" else "clear")
+print("🚀 Turbo Fast Mail Checker (Amazon & Mi Railway) RUNNING")
 bot.infinity_polling(skip_pending=True, timeout=30)
